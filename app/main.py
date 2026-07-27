@@ -16,7 +16,8 @@ Base.metadata.create_all(bind=engine)
 
 app = FastAPI(
     title="AI Research & Knowledge Assistant",
-    version="1.0.0"
+    version="1.0.0",
+    openapi_version="3.0.3"
 )
 
 app.include_router(document_router)

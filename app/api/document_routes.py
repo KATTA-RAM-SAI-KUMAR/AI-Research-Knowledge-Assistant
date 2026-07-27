@@ -1,5 +1,6 @@
 import os
 import shutil
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy.orm import Session
@@ -26,75 +27,136 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 
 # -----------------------------------
-# Upload PDF
+# Upload Multiple PDFs
 # -----------------------------------
+from fastapi import UploadFile, File
+
 @router.post("/upload")
-async def upload_document(
-    file: UploadFile = File(...),
+async def upload_documents(
+    files: list[UploadFile] = File(...),
     db: Session = Depends(get_db)
 ):
 
-    if not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(
-            status_code=400,
-            detail="Only PDF files are allowed."
-        )
+    uploaded_documents = []
+    failed_documents = []
 
-    file_path = os.path.join(
-        UPLOAD_FOLDER,
-        file.filename
-    )
-
-    with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-
-    # Extract PDF
-    pages = PDFProcessor.extract_text(file_path)
-
-    # Create chunks
-    chunks = TextChunker.create_chunks(pages)
-
-    # Merge all page text for ML prediction
-    full_text = " ".join(
-        page["text"] for page in pages
-    )
-
-    # Predict category
-    predicted_category = classifier.predict(full_text)
-
-    # Save metadata
-    document = Document(
-        file_name=file.filename,
-        total_pages=len(pages),
-        total_chunks=len(chunks),
-        processing_status="PROCESSED",
-        category=predicted_category
-    )
-
-    db.add(document)
-    db.commit()
-    db.refresh(document)
-
-    # Store embeddings
     embedding_model = EmbeddingModel()
 
-    ChromaStore.add_chunks(
-        document_id=document.id,
-        file_name=document.file_name,
-        chunks=chunks,
-        embedding_model=embedding_model
-    )
+    for file in files:
+
+        # Validate extension
+        if not file.filename.lower().endswith(".pdf"):
+            failed_documents.append(
+                {
+                    "file_name": file.filename,
+                    "reason": "Only PDF files are allowed."
+                }
+            )
+            continue
+
+        # Check duplicate
+        existing_document = db.query(Document).filter(
+            Document.file_name == file.filename
+        ).first()
+
+        if existing_document:
+            failed_documents.append(
+                {
+                    "file_name": file.filename,
+                    "reason": "Document already exists."
+                }
+            )
+            continue
+
+        file_path = os.path.join(
+            UPLOAD_FOLDER,
+            file.filename
+        )
+
+        try:
+
+            with open(file_path, "wb") as buffer:
+                shutil.copyfileobj(file.file, buffer)
+
+            # Extract PDF
+            pages = PDFProcessor.extract_text(file_path)
+
+            if not pages or all(
+                not page["text"].strip()
+                for page in pages
+            ):
+                raise Exception(
+                    "PDF contains no readable text."
+                )
+
+            # Create chunks
+            chunks = TextChunker.create_chunks(
+                pages
+            )
+
+            # Merge text
+            full_text = " ".join(
+                page["text"]
+                for page in pages
+            )
+
+            # Predict category
+            predicted_category = classifier.predict(
+                full_text
+            )
+
+            # Save metadata
+            document = Document(
+                file_name=file.filename,
+                total_pages=len(pages),
+                total_chunks=len(chunks),
+                processing_status="PROCESSED",
+                category=predicted_category
+            )
+
+            db.add(document)
+            db.commit()
+            db.refresh(document)
+
+            # Store embeddings
+            ChromaStore.add_chunks(
+                document_id=document.id,
+                file_name=document.file_name,
+                chunks=chunks,
+                embedding_model=embedding_model
+            )
+
+            uploaded_documents.append(
+                {
+                    "id": document.id,
+                    "file_name": document.file_name,
+                    "category": document.category,
+                    "total_pages": document.total_pages,
+                    "total_chunks": document.total_chunks,
+                    "status": document.processing_status
+                }
+            )
+
+        except Exception as e:
+
+            db.rollback()
+
+            if os.path.exists(file_path):
+                os.remove(file_path)
+
+            failed_documents.append(
+                {
+                    "file_name": file.filename,
+                    "reason": str(e)
+                }
+            )
 
     return {
-        "message": "Document uploaded successfully",
-        "document": {
-            "id": document.id,
-            "file_name": document.file_name,
-            "category": document.category,
-            "total_pages": document.total_pages,
-            "total_chunks": document.total_chunks,
-            "status": document.processing_status
-        }
+        "message": "Upload completed.",
+        "uploaded_count": len(uploaded_documents),
+        "failed_count": len(failed_documents),
+        "uploaded_documents": uploaded_documents,
+        "failed_documents": failed_documents
     }
 
 
@@ -125,8 +187,6 @@ def list_documents(
             for doc in documents
         ]
     }
-
-
 # -----------------------------------
 # Reprocess Document
 # -----------------------------------
@@ -157,48 +217,75 @@ def reprocess_document(
             detail="PDF file not found."
         )
 
-    pages = PDFProcessor.extract_text(file_path)
+    try:
 
-    chunks = TextChunker.create_chunks(pages)
+        pages = PDFProcessor.extract_text(file_path)
 
-    full_text = " ".join(
-        page["text"] for page in pages
-    )
+        if not pages or all(
+            not page["text"].strip()
+            for page in pages
+        ):
+            raise Exception(
+                "PDF contains no readable text."
+            )
 
-    predicted_category = classifier.predict(full_text)
+        chunks = TextChunker.create_chunks(
+            pages
+        )
 
-    embedding_model = EmbeddingModel()
+        full_text = " ".join(
+            page["text"]
+            for page in pages
+        )
 
-    # Delete old embeddings
-    ChromaStore.delete_document(document.id)
+        predicted_category = classifier.predict(
+            full_text
+        )
 
-    # Store new embeddings
-    ChromaStore.add_chunks(
-        document_id=document.id,
-        file_name=document.file_name,
-        chunks=chunks,
-        embedding_model=embedding_model
-    )
+        embedding_model = EmbeddingModel()
 
-    # Update metadata
-    document.total_pages = len(pages)
-    document.total_chunks = len(chunks)
-    document.processing_status = "PROCESSED"
-    document.category = predicted_category
+        # Delete old embeddings
+        ChromaStore.delete_document(
+            document.id
+        )
 
-    db.commit()
+        # Store new embeddings
+        ChromaStore.add_chunks(
+            document_id=document.id,
+            file_name=document.file_name,
+            chunks=chunks,
+            embedding_model=embedding_model
+        )
 
-    return {
-        "message": "Document reprocessed successfully",
-        "document": {
-            "id": document.id,
-            "file_name": document.file_name,
-            "category": document.category,
-            "total_pages": document.total_pages,
-            "total_chunks": document.total_chunks,
-            "processing_status": document.processing_status
+        # Update metadata
+        document.total_pages = len(pages)
+        document.total_chunks = len(chunks)
+        document.processing_status = "PROCESSED"
+        document.category = predicted_category
+
+        db.commit()
+        db.refresh(document)
+
+        return {
+            "message": "Document reprocessed successfully.",
+            "document": {
+                "id": document.id,
+                "file_name": document.file_name,
+                "category": document.category,
+                "total_pages": document.total_pages,
+                "total_chunks": document.total_chunks,
+                "processing_status": document.processing_status
+            }
         }
-    }
+
+    except Exception as e:
+
+        db.rollback()
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to reprocess document: {str(e)}"
+        )
 
 
 # -----------------------------------
@@ -225,15 +312,28 @@ def delete_document(
         document.file_name
     )
 
-    if os.path.exists(file_path):
-        os.remove(file_path)
+    try:
 
-    # Delete embeddings
-    ChromaStore.delete_document(document.id)
+        if os.path.exists(file_path):
+            os.remove(file_path)
 
-    db.delete(document)
-    db.commit()
+        # Delete embeddings
+        ChromaStore.delete_document(
+            document.id
+        )
 
-    return {
-        "message": "Document deleted successfully"
-    }
+        db.delete(document)
+        db.commit()
+
+        return {
+            "message": "Document deleted successfully."
+        }
+
+    except Exception as e:
+
+        db.rollback()
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to delete document: {str(e)}"
+        )
