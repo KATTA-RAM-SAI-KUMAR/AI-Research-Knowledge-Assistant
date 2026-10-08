@@ -1,8 +1,5 @@
 import pickle
 import numpy as np
-import tensorflow as tf
-
-from tensorflow.keras.layers import TextVectorization
 
 
 MODEL_PATH = "models/tf_classifier.h5"
@@ -19,11 +16,15 @@ class DocumentClassifier:
         self._loaded = False
 
     def _load_model(self):
-        """Load the ML model only when prediction is actually requested."""
+
         if self._loaded:
             return
 
         print("Loading TensorFlow document classifier...")
+
+        # Import TensorFlow only when classification is actually needed
+        import tensorflow as tf
+        from tensorflow.keras.layers import TextVectorization
 
         self.model = tf.keras.models.load_model(MODEL_PATH)
 
@@ -49,7 +50,6 @@ class DocumentClassifier:
         if text is None or text.strip() == "":
             return "Unknown"
 
-        # Load the model only when prediction is needed
         self._load_model()
 
         vectorized = self.vectorizer(
