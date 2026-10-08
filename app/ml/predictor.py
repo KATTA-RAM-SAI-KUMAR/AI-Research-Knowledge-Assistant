@@ -13,19 +13,26 @@ VECTORIZER_PATH = "models/vectorizer.pkl"
 class DocumentClassifier:
 
     def __init__(self):
+        self.model = None
+        self.label_encoder = None
+        self.vectorizer = None
+        self._loaded = False
 
-        # Load trained model
+    def _load_model(self):
+        """Load the ML model only when prediction is actually requested."""
+        if self._loaded:
+            return
+
+        print("Loading TensorFlow document classifier...")
+
         self.model = tf.keras.models.load_model(MODEL_PATH)
 
-        # Load label encoder
         with open(LABEL_ENCODER_PATH, "rb") as f:
             self.label_encoder = pickle.load(f)
 
-        # Load saved vocabulary
         with open(VECTORIZER_PATH, "rb") as f:
             vocabulary = pickle.load(f)
 
-        # Recreate TextVectorization layer
         self.vectorizer = TextVectorization(
             max_tokens=10000,
             output_mode="int",
@@ -33,17 +40,22 @@ class DocumentClassifier:
             vocabulary=vocabulary
         )
 
+        self._loaded = True
+
+        print("TensorFlow document classifier loaded successfully.")
+
     def predict(self, text: str):
 
         if text is None or text.strip() == "":
             return "Unknown"
 
-        # Vectorize text
+        # Load the model only when prediction is needed
+        self._load_model()
+
         vectorized = self.vectorizer(
             np.array([text], dtype=object)
         )
 
-        # Predict
         prediction = self.model.predict(
             vectorized,
             verbose=0
